@@ -55,10 +55,9 @@ pip install matplotlib
 ```
 
 
-8. Run `train.py` to train the model. You can modify hyperparameters in the `get_args()` function.
-9. Draw a grayscale image (e.g., using Microsoft Whiteboard or similar tools).
-10. Save the image and update the `image_path` hyperparameter in `inference.py`.
-10. Run `inference.py`.
+8. Run `train.py` to train the model. You can modify hyperparameters in `get_args()` function.
+9. Download a animal picture.
+11. Run `inference.py`. Rememeber to check for the hyperparameters in `get_args()` function.
 
 ## Sample Result
 ![Alt text](./sample_result.png)

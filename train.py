@@ -1,31 +1,31 @@
+"""
+Training my own CNN model. You can use other avalable models (Resnet, VGG, ...) instead.
+"""
 from dataset import AnimalDataset
+from model import CNN
+import argparse
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-import numpy as np
+from torch.optim import Adam
+import torch.nn as nn
+import os
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 from sklearn.metrics import accuracy_score, confusion_matrix
 import matplotlib.pyplot as plt
-import os
-import argparse
-from torchvision.models import resnet18, ResNet18_Weights
+import numpy as np
 
-"""
-    Train the model using resnet18
-"""
-
-#This is the argument to change the hyperparameters of the model
+#This returns the argument to change the hyperparameters of the model
 def get_args():
-    parser = argparse.ArgumentParser(description="Animal classifier")
-    parser.add_argument("--data-path", "-d", type = str, default = "datasets/animals", help = "path to dataset")
-    parser.add_argument("--log-path", "-o", type = str, default = "animal_CNN/tensorboard", help = "tensorboard folder")
-    parser.add_argument("--checkpoint-path", "-c", type = str, default = "animal_CNN/checkpoints", help = "checkpoint folder")
-    parser.add_argument("--image-size", "-i", type = int, default = 224, help = "common size of all images")
-    parser.add_argument("--batch-size", "-b", type = int, default = 32, help = "batch size of training procedure")
-    parser.add_argument("--num-epochs","-e", type = int, default = 100, help = "Number of epochs")
-    parser.add_argument("--lr", "-l", type = float, default = 1e-3, help = "learning rate of optimizer")
-    parser.add_argument("--resume-training", "-r", type = bool, default = False, help = "Continue to train from the last model or not")
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--data_path", "-d", type = str, default = "./datasets/animals", help = "Path to the dataset")
+    parser.add_argument("--learning_rate", "-l", type = float, default = 1e-3, help = "Learning rate of the optimizer")
+    parser.add_argument("--batch_size", "-b", type = int, default = 4, help = "Number of images that goes into models each time")
+    parser.add_argument("--epochs", "-e", type = int,  default = 100, help = "Number of epochs")
+    parser.add_argument("--checkpoint_path", "-c", type = str, default = "./animal_classification/checkpoints", help = "checkpoint folder")
+    parser.add_argument("--tensorboard_path", "-t", type = str, default = "./animal_classification/tensorboard", help = "tensorboard folder")
+    parser.add_argument("--resume_training", "-r", type = bool, default = True, help = "Continue training from previous model or not")
 
     args = parser.parse_args()
     return args
@@ -67,125 +67,135 @@ def plot_confusion_matrix(writer, cm, class_names, epoch):
 
 #This function are steps to train the model
 def train(args):
-    #hyperparemeters and models
+    #hyperparemeters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if not os.path.isdir(args.log_path):
-        os.makedirs(args.log_path)
-    if not os.path.isdir(args.checkpoint_path):
-        os.makedirs(args.checkpoint_path)
-    writer = SummaryWriter(args.log_path)
+    if not os.path.exists(args.checkpoint_path):
+        os.mkdir(args.checkpoint_path)
+    if not os.path.exists(args.tensorboard_path):
+        os.mkdir(args.tensorboard_path)
+    writer = SummaryWriter(args.tensorboard_path)
     
-    #data preprocessing   
-    mean = [0.51825233, 0.50104613, 0.41361094]
-    std = [0.26689603, 0.26242321, 0.27955858]
+    #data preprocessing
+    mean = [0.485, 0.456, 0.406] 
+    std = [0.229, 0.224, 0.225]
     train_set = AnimalDataset(root = args.data_path,
                               mean = mean,
                               std = std,
-                              train = True,
-                              size = args.image_size)
-    train_loader = DataLoader(train_set,
-                              batch_size = args.batch_size,
-                              shuffle = True,
-                              num_workers = 8,
-                              drop_last = True,)
-    eval_set = AnimalDataset(root = args.data_path,
-                             mean = mean,
-                             std = std,
-                             train = False,
-                             size = args.image_size)
-    eval_loader = DataLoader(eval_set,
-                             batch_size = args.batch_size,
-                             shuffle = False,
-                             num_workers = 8,
-                             drop_last = False)
+                              train = True)
+    train_dataloader = DataLoader(dataset = train_set,
+                                  batch_size = args.batch_size,
+                                  shuffle = True,
+                                  drop_last = True,
+                                  num_workers = 4)
+    val_set = AnimalDataset(root = args.data_path,
+                            mean = mean,
+                            std = std,
+                            train = False)
+    val_dataloader = DataLoader(dataset = val_set,
+                                batch_size = args.batch_size,
+                                shuffle = False,
+                                drop_last = False,
+                                num_workers = 4)
     
-    #modeling
-    model = resnet18(weights = ResNet18_Weights.IMAGENET1K_V1)
-    #edit the last layer of the model
-    in_features = model.fc.in_features
-    model.fc = nn.Linear(in_features, len(train_set.categories), bias = True)
-    model = model.to(device)
-    
+    #model, loss function and optimizer
+    model = CNN(num_classes = len(train_set.classes))
+    model.to(device)
+    optimizer = Adam(params = model.parameters(), lr = args.learning_rate)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr = args.lr)
 
     if args.resume_training:
+        model_path = os.path.join(args.checkpoint_path, "last.pt")
+        saved_data = torch.load(model_path)
+
         model.load_state_dict(saved_data["model"])
         optimizer.load_state_dict(saved_data["optimizer"])
         start_epoch = saved_data["epoch"]
         best_accuracy = saved_data["best_accuracy"]
     else:
         start_epoch = 0
-        best_accuracy = 0
-   
-    #training phase
-    for epoch in range(start_epoch, args.num_epochs):
-        total_losses = 0
-        progress_bar = tqdm(train_loader, colour = "green")
+        best_accuracy = 0   #this value is to compare accuracy between models
+    
+    for epoch_id in range(start_epoch, args.epochs):
+        #trainng phase
         model.train()
-        for iter, (images, labels) in enumerate(progress_bar):
+        total_loss = 0
+        progress_bar = tqdm(train_dataloader)
+        for batch_id, (image, label) in enumerate(progress_bar):
             #forward pass
-            images = images.to(device)
-            labels = labels.to(device)
-            output = model(images)
+            image = image.to(device)
+            label = label.to(device)
+            output = model(image)
 
             #calculate loss
-            loss = criterion(output, labels)
-            total_losses += loss.item()
-            avg_loss = total_losses / (iter + 1)
-            progress_bar.set_description(f"Epoch {epoch + 1}/{args.num_epochs}, Loss: {avg_loss:.4f}, Device: {device}")
-            writer.add_scalar("Train/Loss",
-                              avg_loss, 
-                              epoch * len(train_loader) + iter)
+            loss = criterion(output, label)
+            total_loss += loss.item()
+            progress_bar.set_description(f"Epoch:{epoch_id + 1}/{args.epochs}, avg_loss: {total_loss/(batch_id + 1)}, device: {device}")
+            writer.add_scalar("Train/Loss", total_loss/(batch_id + 1), epoch_id * len(train_dataloader) + batch_id)
             
             #backward pass
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-    
-        #evaluation phase
+        
+        #validation phase
         model.eval()
-        total_losses = 0
+        total_loss = 0
         y_true = []
         y_pred = []
-        progress_bar = tqdm(eval_loader, colour = "yellow")
-
+        progress_bar = tqdm(val_dataloader)
         with torch.no_grad():
-            for images, labels in progress_bar:
-                images = images.to(device)
-                labels = labels.to(device)
-                output = model(images)
+            for batch_id, (image, label) in enumerate(progress_bar):
+                #forward pass
+                image = image.to(device)
+                label = label.to(device)
+                output = model(image)
+                predictions = torch.argmax(output, dim = 1)
+                
+                #calculate loss
+                loss = criterion(output, label)
+                total_loss += loss.item()
+                progress_bar.set_description(f"Epoch:{epoch_id + 1}/{args.epochs}, avg_loss: {total_loss/(batch_id + 1)}, device: {device}")
+                writer.add_scalar("Eval/Loss", total_loss/(batch_id + 1), epoch_id * len(val_dataloader) + batch_id)
 
-                total_losses += criterion(output, labels).item()
-                y_true.extend(labels.tolist())
-                predictions = output.argmax(dim = 1)
+                y_true.extend(label.tolist())
                 y_pred.extend(predictions.tolist())
+            accuracy = accuracy_score(y_true, y_pred)
+            writer.add_scalar("Eval/Accuracy", accuracy, epoch_id)
+            plot_confusion_matrix(writer, confusion_matrix(y_true, y_pred), train_set.classes, epoch_id)
+            
+        #save the model
+        saved_data= {"epoch": epoch_id + 1,
+                     "model": model.state_dict(),
+                     "optimizer": optimizer.state_dict(),
+                     "best_accuracy": max(accuracy, best_accuracy),
+                     "mean": mean,
+                     "std": std,
+                     "classes": train_set.classes}
+        last_model_path = os.path.join(args.checkpoint_path, "last.pt")
+        torch.save(saved_data, last_model_path)
 
-        accuracy = accuracy_score(y_true, y_pred)
-        loss = total_losses / len(eval_loader)
-        print(f"Epoch {epoch + 1}/{args.num_epochs}, Accuracy: {accuracy:.4f}, Loss: {loss:.4f}")
-        writer.add_scalar("Eval/Accuracy", accuracy, epoch)
-        plot_confusion_matrix(writer, confusion_matrix(y_true, y_pred), train_set.categories, epoch)
-
-        #save the latest model (for resume training)
-        saved_data = {
-            "epoch": epoch + 1,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "best_accuracy": max(accuracy, best_accuracy),
-            "mean": mean,
-            "std": std,
-            "categories": train_set.categories
-        }
-        checkpoint = os.path.join(args.checkpoint_path, "last.pt")
-        torch.save(saved_data, checkpoint)
-
-        #save the best model(for deployment)
         if accuracy > best_accuracy:
-            checkpoint = os.path.join(args.checkpoint_path, "best.pt")
-            torch.save(saved_data, checkpoint)
+            best_model_path = os.path.join(args.checkpoint_path, "best.pt")
+            torch.save(saved_data, best_model_path)
             best_accuracy = accuracy
 
 if __name__ == "__main__":
     args = get_args()
     train(args)
+
+        
+
+
+
+
+
+
+
+
+
+
+    
+
+    
+    
+
